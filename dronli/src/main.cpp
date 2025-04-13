@@ -26,6 +26,9 @@ bool frameStarted = false;
 uint8_t frameCounter = 0;
 uint8_t dataBuffer[9];
 
+// Прототип функції (оголошення)
+bool readLidarData();
+
 void setup() {
   // Ініціалізація серійного порту для налагодження
   Serial.begin(9600);
@@ -39,30 +42,6 @@ void setup() {
   lidarSerial.begin(LIDAR_BAUDRATE);
   
   delay(500);
-}
-
-void loop() {
-  // Читання даних з лідара
-  if (readLidarData()) {
-    // Виведення даних для налагодження
-    Serial.print("Відстань: ");
-    Serial.print(distance / 100.0); // Перетворення см в метри
-    Serial.print(" м, Сила сигналу: ");
-    Serial.println(strength);
-    
-    // Перевірка наявності перешкоди
-    if ((distance / 100.0) <= OBSTACLE_DISTANCE) {
-      // Перешкода виявлена, повертаємо серво для уникнення
-      Serial.println("Перешкода виявлена! Уникаємо...");
-      steeringServo.write(AVOID_ANGLE);
-    } else {
-      // Перешкоди немає, повертаємося до звичайного положення
-      steeringServo.write(DEFAULT_ANGLE);
-    }
-  }
-  
-  // Невелика затримка для стабільності
-  delay(50);
 }
 
 // Функція для читання та обробки даних з лідара TF02-Pro
@@ -110,4 +89,28 @@ bool readLidarData() {
     }
   }
   return false;
+}
+
+void loop() {
+  // Читання даних з лідара
+  if (readLidarData()) {
+    // Виведення даних для налагодження
+    Serial.print("Відстань: ");
+    Serial.print(distance / 100.0); // Перетворення см в метри
+    Serial.print(" м, Сила сигналу: ");
+    Serial.println(strength);
+    
+    // Перевірка наявності перешкоди
+    if ((distance / 100.0) <= OBSTACLE_DISTANCE) {
+      // Перешкода виявлена, повертаємо серво для уникнення
+      Serial.println("Перешкода виявлена! Уникаємо...");
+      steeringServo.write(AVOID_ANGLE);
+    } else {
+      // Перешкоди немає, повертаємося до звичайного положення
+      steeringServo.write(DEFAULT_ANGLE);
+    }
+  }
+  
+  // Невелика затримка для стабільності
+  delay(50);
 }
