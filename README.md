@@ -1,6 +1,7 @@
 ціна лідару зараза в україні 6000
 https://mikronika.net/product/benewake-lidar-tf02-pro?srsltid=AfmBOopplgaCw6pXc5RinPFA9U05KqWNsWkvzrWxoPub1LURgUQXNRYN
-
+основна розробка і основний код за шляхом /master/dronv1/src
+всі решту папок є допоміжними 
 ## Основні компоненти системи
 
 1. **ESP32 мікроконтролер**: 
