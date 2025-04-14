@@ -3,7 +3,7 @@ https://mikronika.net/product/benewake-lidar-tf02-pro?srsltid=AfmBOopplgaCw6pXc5
 
 
 **основна розробка і основний код за шляхом /master/dronv1/src
-всі решту папок є допоміжними **
+всі решту папок є допоміжними**
 ## Основні компоненти системи
 
 1. **ESP32 мікроконтролер**: 
