@@ -2,32 +2,7 @@
 #include <ESP32Servo.h>
 #include <SoftwareSerial.h>
 #include "MSP.h"
-
-// --- UART налаштування ---
-#define RX_PIN 16
-#define TX_PIN 17
-#define SERIAL_BAUD 115200
-
-// --- MSP команда ---
-#define MSP_RC_CHANNEL 0x0200
-
-// --- Тумблер налаштування ---
-#define SWITCH_CHANNEL 5
-#define LOW_THRESHOLD 1100
-#define MID_THRESHOLD 1500
-#define HIGH_THRESHOLD 1900
-#define DEAD_BAND 150
-
-// --- Лідар TF02-Pro ---
-#define LIDAR_RX 2
-#define LIDAR_TX 3
-#define LIDAR_BAUDRATE 115200
-#define OBSTACLE_DISTANCE 25.0  // Відстань до перешкоди в метрах
-
-// --- Сервопривід ---
-#define SERVO_PIN 9
-#define DEFAULT_ANGLE 0     // Початковий кут сервоприводу
-#define AVOID_ANGLE 90      // Кут для уникнення перешкоди
+#include "constants.h"
 
 // --- Стани перемикача ---
 enum SwitchMode {
@@ -54,15 +29,22 @@ bool frameStarted = false;
 uint8_t frameCounter = 0;
 uint8_t dataBuffer[9];
 
+// --- Додаткові змінні для уникнення перешкод ---
+unsigned long obstacleDetectedTime = 0;  // Час першого виявлення перешкоди
+bool isObstacleConfirmed = false;        // Прапорець підтвердженої перешкоди
+const unsigned long OBSTACLE_CONFIRM_DELAY = 50; // Затримка підтвердження в мс
+
 // ====================== ФУНКЦІЇ ======================
 
 // --- Визначення режиму ---
 SwitchMode getSwitchMode(uint16_t value) {
   if (value < (LOW_THRESHOLD + DEAD_BAND)) {
     return MODE_OFF;
-  } else if (value > (HIGH_THRESHOLD - DEAD_BAND)) {
+  } 
+  if (value > (HIGH_THRESHOLD - DEAD_BAND)) {
     return MODE_MANUAL;
-  } else if (value > (MID_THRESHOLD - DEAD_BAND) && value < (MID_THRESHOLD + DEAD_BAND)) {
+  } 
+  if (value > (MID_THRESHOLD - DEAD_BAND) && value < (MID_THRESHOLD + DEAD_BAND)) {
     return MODE_AUTO;
   }
   return MODE_UNKNOWN;
@@ -72,6 +54,10 @@ SwitchMode getSwitchMode(uint16_t value) {
 void actionForModeOff() {
   Serial.println("[ACTION] Mode: OFF");
   steeringServo.write(DEFAULT_ANGLE);  // Сервопривід у вихідне положення
+  
+  // Скидаємо змінні відстеження перешкод при вимкненні режиму AUTO
+  obstacleDetectedTime = 0;
+  isObstacleConfirmed = false;
 }
 
 void actionForModeAuto() {
@@ -82,91 +68,121 @@ void actionForModeAuto() {
 void actionForModeManual() {
   Serial.println("[ACTION] Mode: MANUAL");
   // Керування вручну (серво не керується автоматично)
+  
+  // Скидаємо змінні відстеження перешкод при виході з режиму AUTO
+  obstacleDetectedTime = 0;
+  isObstacleConfirmed = false;
 }
 
 // --- Читання даних з лідара ---
 bool readLidarData() {
+  if (lidarSerial.available() < 9) {
+    return false;
+  }
+
   while (lidarSerial.available() >= 9) {
     uint8_t currentByte = lidarSerial.read();
     
-    // Перевірка початку кадру (0x59, 0x59)
+    // Випадок 1: Шукаємо початок кадру
     if (!frameStarted) {
       if (currentByte == 0x59) {
         dataBuffer[0] = currentByte;
         frameCounter = 1;
         frameStarted = true;
       }
-    } else if (frameCounter == 1) {
-      if (currentByte == 0x59) {
-        dataBuffer[1] = currentByte;
-        frameCounter = 2;
-      } else {
-        frameStarted = false;
-      }
-    } else {
-      // Зберігаємо байти даних
-      dataBuffer[frameCounter] = currentByte;
-      frameCounter++;
-      
-      // Якщо отримали всі 9 байтів
-      if (frameCounter == 9) {
-        frameStarted = false;
-        
-        // Обчислення контрольної суми
-        uint8_t calculatedChecksum = 0;
-        for (int i = 0; i < 8; i++) {
-          calculatedChecksum += dataBuffer[i];
-        }
-        
-        // Перевірка контрольної суми
-        if (calculatedChecksum == dataBuffer[8]) {
-          // Розбір даних лідара
-          distance = dataBuffer[2] + (dataBuffer[3] << 8);  // Відстань в см
-          strength = dataBuffer[4] + (dataBuffer[5] << 8);  // Сила сигналу
-          return true;
-        }
-      }
+      continue;
     }
+    
+    // Випадок 2: Перевіряємо другий байт заголовка
+    if (frameCounter == 1) {
+      if (currentByte != 0x59) {
+        // Невірний другий байт - скидаємо кадр
+        frameStarted = false;
+        continue;
+      }
+      dataBuffer[1] = currentByte;
+      frameCounter = 2;
+      continue;
+    }
+    
+    // Випадок 3: Збираємо дані кадру
+    dataBuffer[frameCounter] = currentByte;
+    frameCounter++;
+    
+    // Перевіряємо чи зібрали повний кадр
+    if (frameCounter < 9) {
+      continue;
+    }
+    
+    // Повний кадр отримано - обробляємо
+    frameStarted = false;
+    
+    // Обчислення контрольної суми
+    uint8_t calculatedChecksum = 0;
+    for (int i = 0; i < 8; i++) {
+      calculatedChecksum += dataBuffer[i];
+    }
+    
+    // Неправильна контрольна сума
+    if (calculatedChecksum != dataBuffer[8]) {
+      continue;
+    }
+    
+    // Розбір даних лідара
+    distance = dataBuffer[2] + (dataBuffer[3] << 8);  // Відстань в см
+    strength = dataBuffer[4] + (dataBuffer[5] << 8);  // Сила сигналу
+    return true;
   }
+  
   return false;
 }
 
 // --- Обробка MSP ---
 void processMSP() {
-  if (msp.request(MSP_RC_CHANNEL, &rcChannels)) {
-    if (rcChannels.channelCount > SWITCH_CHANNEL) {
-      uint16_t switchValue = rcChannels.channels[SWITCH_CHANNEL];
-      SwitchMode newMode = getSwitchMode(switchValue);
-      if (newMode != currentMode) {
-        currentMode = newMode;
-        Serial.print("Switch value: ");
-        Serial.print(switchValue);
-        Serial.print(" | New mode: ");
-        switch (currentMode) {
-          case MODE_OFF:
-            Serial.println("OFF");
-            actionForModeOff();
-            break;
-          case MODE_AUTO:
-            Serial.println("AUTO");
-            actionForModeAuto();
-            break;
-          case MODE_MANUAL:
-            Serial.println("MANUAL");
-            actionForModeManual();
-            break;
-          default:
-            Serial.println("UNKNOWN");
-            break;
-        }
-        lastMode = currentMode;
-      } else if (currentMode == MODE_AUTO) {
-        actionForModeAuto();
-      }
-    }
-  } else {
+  if (!msp.request(MSP_RC_CHANNEL, &rcChannels)) {
     Serial.println("MSP RC_CHANNEL request failed.");
+    return;
   }
+  
+  if (rcChannels.channelCount <= SWITCH_CHANNEL) {
+    return;
+  }
+  
+  uint16_t switchValue = rcChannels.channels[SWITCH_CHANNEL];
+  SwitchMode newMode = getSwitchMode(switchValue);
+  
+  if (newMode == currentMode) {
+    if (currentMode == MODE_AUTO) {
+      actionForModeAuto();
+    }
+    return;
+  }
+  
+  // Обробка зміни режиму
+  currentMode = newMode;
+  Serial.print("Switch value: ");
+  Serial.print(switchValue);
+  Serial.print(" | New mode: ");
+  
+  switch (currentMode) {
+    case MODE_OFF:
+      Serial.println("OFF");
+      actionForModeOff();
+      break;
+    case MODE_AUTO:
+      Serial.println("AUTO");
+      actionForModeAuto();
+      break;
+    case MODE_MANUAL:
+      Serial.println("MANUAL");
+      actionForModeManual();
+      break;
+    default:
+      Serial.println("UNKNOWN");
+      break;
+  }
+  
+  lastMode = currentMode;
 }
 
 // ====================== SETUP & LOOP ======================
@@ -192,18 +208,34 @@ void loop() {
   processMSP();  // Обробка режимів (OFF/AUTO/MANUAL)
 
   // Якщо режим AUTO - обробка даних лідара
-  if (currentMode == MODE_AUTO) {
-    if (readLidarData()) {
-      Serial.print("Distance: ");
-      Serial.print(distance / 100.0);
-      Serial.print(" m | Strength: ");
-      Serial.println(strength);
+  if (currentMode != MODE_AUTO) {
+    delay(50);
+    return;
+  }
+  
+  if (readLidarData()) {
+    Serial.print("Distance: ");
+    Serial.print(distance / 100.0);
+    Serial.print(" m | Strength: ");
+    Serial.println(strength);
 
-      // Перевірка на перешкоду
-      if ((distance / 100.0) <= OBSTACLE_DISTANCE) {
+    // Перевірка на перешкоду з підтвердженням
+    if ((distance / 100.0) <= OBSTACLE_DISTANCE) {
+      // Якщо перешкода виявлена вперше
+      if (obstacleDetectedTime == 0) {
+        obstacleDetectedTime = millis();  // Зберегти час першого виявлення
+      }
+      // Перевірка чи пройшов необхідний час для підтвердження
+      else if (!isObstacleConfirmed && (millis() - obstacleDetectedTime >= OBSTACLE_CONFIRM_DELAY)) {
+        isObstacleConfirmed = true;
         Serial.println("Obstacle detected! Avoiding...");
         steeringServo.write(AVOID_ANGLE);
-      } else {
+      }
+    } else {
+      // Перешкоди немає - скинути змінні відстеження
+      obstacleDetectedTime = 0;
+      if (isObstacleConfirmed) {
+        isObstacleConfirmed = false;
         steeringServo.write(DEFAULT_ANGLE);
       }
     }
