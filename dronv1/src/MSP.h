@@ -27,7 +27,7 @@ public:
       // Тестові значення
       for (int i = 0; i < 16; i++) {
         if (i == 5) {
-          // Симуляція перемикача
+          // Симуляція основного перемикача (OFF/AUTO/MANUAL)
           unsigned long currentTime = millis() / 5000;
           int position = currentTime % 3;
           
@@ -36,7 +36,18 @@ public:
             case 1: channels->channels[i] = 1500; break; // AUTO
             case 2: channels->channels[i] = 2000; break; // MANUAL
           }
-        } else {
+        } 
+        else if (i == 6) {
+          // Симуляція додаткового перемикача (OFF/ON)
+          unsigned long currentTime = millis() / 7000; // Інший період для різної поведінки
+          int position = currentTime % 2;
+          
+          switch (position) {
+            case 0: channels->channels[i] = 1000; break; // OFF
+            case 1: channels->channels[i] = 2000; break; // ON
+          }
+        }
+        else {
           channels->channels[i] = 1500;
         }
       }
