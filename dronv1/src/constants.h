@@ -26,9 +26,18 @@
 #define LIDAR_BAUDRATE 115200
 #define OBSTACLE_DISTANCE 25.0  // Відстань до перешкоди в метрах
 
-// --- Сервопривід ---
-#define SERVO_PIN 9
-#define DEFAULT_ANGLE 0     // Початковий кут сервоприводу
-#define AVOID_ANGLE 90      // Кут для уникнення перешкоди
+// --- Сервоприводи ---
+#define SERVO1_PIN 9
+#define SERVO2_PIN 10
+#define SERVO3_PIN 11
+#define SERVO4_PIN 12
+#define SERVO5_PIN 13
+#define SERVO6_PIN 14
+
+#define SERVO_REST_ANGLE 0     // Кут спокою для сервоприводів
+#define SERVO_ACTIVE_ANGLE 90  // Кут активації для сервоприводів
+
+// --- Тригер --- 
+#define TRIGGER_DEBOUNCE_TIME 500  // Захист від брязкоту в мс
 
 #endif // CONSTANTS_H
