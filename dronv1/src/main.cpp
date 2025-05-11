@@ -18,6 +18,14 @@ enum AuxSwitchState {
   AUX_ON
 };
 
+// --- Стани для машини станів лідара ---
+enum LidarState {
+  WAITING_FOR_HEADER1,
+  WAITING_FOR_HEADER2,
+  READING_DATA,
+  READING_CHECKSUM
+};
+
 // --- Глобальні змінні ---
 SwitchMode currentMode = MODE_UNKNOWN;
 SwitchMode lastMode = MODE_UNKNOWN;
@@ -29,20 +37,19 @@ RCChannels rcChannels;
 
 // --- Лідар ---
 SoftwareSerial lidarSerial(LIDAR_RX, LIDAR_TX);
+LidarState lidarState = WAITING_FOR_HEADER1;
 uint16_t distance = 0;
 uint16_t strength = 0;
-uint8_t checksum = 0;
-bool frameStarted = false;
-uint8_t frameCounter = 0;
-uint8_t dataBuffer[9];
+uint8_t lidarBuffer[9];
+uint8_t lidarIndex = 0;
 
-// --- Додаткові змінні для уникнення перешкод ---
+// --- Змінні для уникнення перешкод ---
 unsigned long obstacleDetectedTime = 0;
 bool isObstacleConfirmed = false;
 const unsigned long OBSTACLE_CONFIRM_DELAY = 50;
-bool obstacleHandled = false;  // Прапорець для відстеження обробленої перешкоди
+bool obstacleHandled = false;
 unsigned long obstacleResetTime = 0;
-const unsigned long OBSTACLE_RESET_DELAY = 2000;  // Затримка перед можливістю нового виявлення (2 секунди)
+const unsigned long OBSTACLE_RESET_DELAY = 2000;
 
 // --- Сервоприводи ---
 const int NUM_SERVOS = 6;
@@ -50,46 +57,40 @@ Servo servos[NUM_SERVOS];
 int servoAngleRest = 0;
 int servoAngleActive = 90;
 int currentServoIndex = 0;
-bool servoActivated[NUM_SERVOS] = {false, false, false, false, false, false}; // Відслідковування активованих сервоприводів
+bool servoActivated[NUM_SERVOS] = {false, false, false, false, false, false};
 bool triggerFlag = false;
 unsigned long lastTriggerTime = 0;
 const unsigned long TRIGGER_DEBOUNCE = 500;
 
 // ====================== ФУНКЦІЇ ======================
 
-// --- Визначення режиму ---
+// --- Визначення режиму з гістерезисом ---
 SwitchMode getSwitchMode(uint16_t value) {
-  if (value < (LOW_THRESHOLD + DEAD_BAND)) {
-    return MODE_OFF;
-  } 
-  if (value > (HIGH_THRESHOLD - DEAD_BAND)) {
-    return MODE_MANUAL;
-  } 
-  if (value > (MID_THRESHOLD - DEAD_BAND) && value < (MID_THRESHOLD + DEAD_BAND)) {
-    return MODE_AUTO;
+  static SwitchMode lastMode = MODE_UNKNOWN;
+  if (value < LOW_THRESHOLD + DEAD_BAND && lastMode != MODE_OFF) {
+    lastMode = MODE_OFF;
+  } else if (value > HIGH_THRESHOLD - DEAD_BAND && lastMode != MODE_MANUAL) {
+    lastMode = MODE_MANUAL;
+  } else if (value > MID_THRESHOLD - DEAD_BAND && value < MID_THRESHOLD + DEAD_BAND && lastMode != MODE_AUTO) {
+    lastMode = MODE_AUTO;
   }
-  return MODE_UNKNOWN;
+  return lastMode;
 }
 
-// --- Визначення стану додаткового перемикача (ON/OFF) ---
+// --- Визначення стану додаткового перемикача ---
 AuxSwitchState getAuxSwitchState(uint16_t value) {
-  if (value < AUX_SWITCH_THRESHOLD) {
-    return AUX_OFF;
-  } else {
-    return AUX_ON;
-  }
+  return (value < AUX_SWITCH_THRESHOLD) ? AUX_OFF : AUX_ON;
 }
 
-// --- Ініціалізація усіх сервоприводів ---
+// --- Ініціалізація сервоприводів ---
 void initializeServos() {
-  const int servoPins[NUM_SERVOS] = {9, 10, 11, 12, 13, 14};
-  
+  const int servoPins[NUM_SERVOS] = {12, 13, 14, 15, 16, 17}; // Перевірені PWM піни для ESP32
   for (int i = 0; i < NUM_SERVOS; i++) {
-    servos[i].attach(servoPins[i]);
-    servos[i].write(servoAngleRest); // Початкове положення
+    servos[i].attach(servoPins[i], 500, 2500); // Налаштування PWM для сервоприводів
+    servos[i].write(servoAngleRest);
     servoActivated[i] = false;
     Serial.print("Servo ");
-    Serial.print(i+1);
+    Serial.print(i + 1);
     Serial.print(" initialized on pin ");
     Serial.println(servoPins[i]);
   }
@@ -97,23 +98,18 @@ void initializeServos() {
 
 // --- Активація наступного сервоприводу ---
 void activateNextServo() {
-  // Перевіряємо чи є ще неактивовані сервоприводи
   if (currentServoIndex < NUM_SERVOS && !servoActivated[currentServoIndex]) {
-    // Активуємо поточний сервопривід
     servos[currentServoIndex].write(servoAngleActive);
     servoActivated[currentServoIndex] = true;
-    
     Serial.print("Activated servo #");
     Serial.println(currentServoIndex + 1);
-    
-    // Переходимо до наступного сервоприводу
     currentServoIndex++;
   } else {
     Serial.println("All servos have been activated already.");
   }
 }
 
-// --- Скидання всіх сервоприводів для нового циклу ---
+// --- Скидання всіх сервоприводів ---
 void resetAllServos() {
   for (int i = 0; i < NUM_SERVOS; i++) {
     servos[i].write(servoAngleRest);
@@ -125,38 +121,27 @@ void resetAllServos() {
 
 // --- Обробка стану додаткового перемикача ---
 void processAuxSwitch() {
-  // В режимі MANUAL тільки коли додатковий перемикач в ON - активувати сервоприводи
   if (currentMode == MODE_MANUAL) {
     unsigned long currentTime = millis();
-    
-    // Якщо перемикач переходить з OFF в ON, активуємо наступний сервопривід
-    if (auxState == AUX_ON && lastAuxState == AUX_OFF) {
+    if (auxState == AUX_ON && lastAuxState == AUX_OFF && (currentTime - lastTriggerTime >= TRIGGER_DEBOUNCE)) {
       activateNextServo();
       lastTriggerTime = currentTime;
       triggerFlag = true;
     }
-    
-    // Оновлюємо стан попереднього значення для відстеження переходів
     lastAuxState = auxState;
   }
 }
 
-// --- Дії для кожного режиму основного перемикача ---
+// --- Дії для режимів ---
 void actionForModeOff() {
   Serial.println("[ACTION] Mode: OFF");
-  
-  // Скидаємо всі сервоприводи (тільки при зміні режиму з MANUAL або AUTO)
   if (lastMode == MODE_MANUAL || lastMode == MODE_AUTO) {
     resetAllServos();
   }
-  
-  // Скидаємо змінні відстеження перешкод
   obstacleDetectedTime = 0;
   isObstacleConfirmed = false;
   obstacleHandled = false;
   obstacleResetTime = 0;
-  
-  // Скидаємо стан додаткового перемикача
   auxState = AUX_OFF;
   lastAuxState = AUX_OFF;
   triggerFlag = false;
@@ -164,19 +149,13 @@ void actionForModeOff() {
 
 void actionForModeAuto() {
   Serial.println("[ACTION] Mode: AUTO");
-  
-  // Скидаємо стан додаткового перемикача
   auxState = AUX_OFF;
   lastAuxState = AUX_OFF;
   triggerFlag = false;
-  
-  // Скидаємо змінні відстеження перешкод
   obstacleDetectedTime = 0;
   isObstacleConfirmed = false;
   obstacleHandled = false;
   obstacleResetTime = 0;
-  
-  // При переході з OFF в AUTO, скидаємо сервоприводи
   if (lastMode == MODE_OFF) {
     resetAllServos();
   }
@@ -184,80 +163,59 @@ void actionForModeAuto() {
 
 void actionForModeManual() {
   Serial.println("[ACTION] Mode: MANUAL");
-  
-  // Скидаємо змінні відстеження перешкод
   obstacleDetectedTime = 0;
   isObstacleConfirmed = false;
   obstacleHandled = false;
   obstacleResetTime = 0;
-  
-  // Скидаємо тригер для послідовної активації
   triggerFlag = false;
-  lastAuxState = AUX_OFF;  // Додано для коректного відстеження переходу
-  
-  // При переході з OFF в MANUAL, скидаємо сервоприводи
+  lastAuxState = AUX_OFF;
   if (lastMode == MODE_OFF) {
     resetAllServos();
   }
 }
 
-// --- Читання даних з лідара ---
+// --- Читання даних з лідара через машину станів ---
 bool readLidarData() {
-  if (lidarSerial.available() < 9) {
-    return false;
+  while (lidarSerial.available()) {
+    uint8_t byte = lidarSerial.read();
+    switch (lidarState) {
+      case WAITING_FOR_HEADER1:
+        if (byte == 0x59) {
+          lidarBuffer[0] = byte;
+          lidarState = WAITING_FOR_HEADER2;
+        }
+        break;
+      case WAITING_FOR_HEADER2:
+        if (byte == 0x59) {
+          lidarBuffer[1] = byte;
+          lidarState = READING_DATA;
+          lidarIndex = 2;
+        } else {
+          lidarState = WAITING_FOR_HEADER1;
+        }
+        break;
+      case READING_DATA:
+        lidarBuffer[lidarIndex++] = byte;
+        if (lidarIndex == 8) {
+          lidarState = READING_CHECKSUM;
+        }
+        break;
+      case READING_CHECKSUM:
+        lidarBuffer[8] = byte;
+        uint8_t calcChecksum = 0;
+        for (int i = 0; i < 8; i++) {
+          calcChecksum += lidarBuffer[i];
+        }
+        if (calcChecksum == lidarBuffer[8]) {
+          distance = lidarBuffer[2] + (lidarBuffer[3] << 8); // Відстань у см
+          strength = lidarBuffer[4] + (lidarBuffer[5] << 8);
+          lidarState = WAITING_FOR_HEADER1;
+          return true;
+        }
+        lidarState = WAITING_FOR_HEADER1;
+        break;
+    }
   }
-
-  while (lidarSerial.available() >= 9) {
-    uint8_t currentByte = lidarSerial.read();
-    
-    // Випадок 1: Шукаємо початок кадру
-    if (!frameStarted) {
-      if (currentByte == 0x59) {
-        dataBuffer[0] = currentByte;
-        frameCounter = 1;
-        frameStarted = true;
-      }
-      continue;
-    }
-    
-    // Випадок 2: Перевіряємо другий байт заголовка
-    if (frameCounter == 1) {
-      if (currentByte != 0x59) {
-        frameStarted = false;
-        continue;
-      }
-      dataBuffer[1] = currentByte;
-      frameCounter = 2;
-      continue;
-    }
-    
-    // Випадок 3: Збираємо дані кадру
-    dataBuffer[frameCounter] = currentByte;
-    frameCounter++;
-    
-    if (frameCounter < 9) {
-      continue;
-    }
-    
-    // Повний кадр отримано - обробляємо
-    frameStarted = false;
-    
-    // Обчислення контрольної суми
-    uint8_t calculatedChecksum = 0;
-    for (int i = 0; i < 8; i++) {
-      calculatedChecksum += dataBuffer[i];
-    }
-    
-    if (calculatedChecksum != dataBuffer[8]) {
-      continue;
-    }
-    
-    // Розбір даних лідара
-    distance = dataBuffer[2] + (dataBuffer[3] << 8);
-    strength = dataBuffer[4] + (dataBuffer[5] << 8);
-    return true;
-  }
-  
   return false;
 }
 
@@ -267,44 +225,26 @@ void processMSP() {
     Serial.println("MSP RC_CHANNEL request failed.");
     return;
   }
-  
-  // Обробка основного перемикача
   if (rcChannels.channelCount > SWITCH_CHANNEL) {
     uint16_t switchValue = rcChannels.channels[SWITCH_CHANNEL];
     SwitchMode newMode = getSwitchMode(switchValue);
-    
     if (newMode != currentMode) {
       lastMode = currentMode;
       currentMode = newMode;
       Serial.print("Switch value: ");
       Serial.print(switchValue);
       Serial.print(" | New mode: ");
-      
       switch (currentMode) {
-        case MODE_OFF:
-          Serial.println("OFF");
-          actionForModeOff();
-          break;
-        case MODE_AUTO:
-          Serial.println("AUTO");
-          actionForModeAuto();
-          break;
-        case MODE_MANUAL:
-          Serial.println("MANUAL");
-          actionForModeManual();
-          break;
-        default:
-          Serial.println("UNKNOWN");
-          break;
+        case MODE_OFF: Serial.println("OFF"); actionForModeOff(); break;
+        case MODE_AUTO: Serial.println("AUTO"); actionForModeAuto(); break;
+        case MODE_MANUAL: Serial.println("MANUAL"); actionForModeManual(); break;
+        default: Serial.println("UNKNOWN"); break;
       }
     }
   }
-  
-  // Обробка додаткового перемикача
   if (rcChannels.channelCount > AUX_SWITCH_CHANNEL) {
     uint16_t auxValue = rcChannels.channels[AUX_SWITCH_CHANNEL];
     AuxSwitchState newAuxState = getAuxSwitchState(auxValue);
-    
     if (newAuxState != auxState) {
       auxState = newAuxState;
       Serial.print("Aux Switch value: ");
@@ -316,46 +256,34 @@ void processMSP() {
 
 // --- Обробка даних лідара в режимі AUTO ---
 void processLidarDataInAutoMode() {
-  // Перевіряємо чи пройшов час скидання після останньої обробленої перешкоди
   if (obstacleHandled) {
-    if (obstacleResetTime == 0) {
-      obstacleResetTime = millis();
-    } else if (millis() - obstacleResetTime >= OBSTACLE_RESET_DELAY) {
-      // Час скидання минув, скидаємо всі прапорці для відстеження нової перешкоди
+    if (millis() - obstacleResetTime >= OBSTACLE_RESET_DELAY) {
       obstacleHandled = false;
       obstacleResetTime = 0;
       obstacleDetectedTime = 0;
       isObstacleConfirmed = false;
       Serial.println("Reset obstacle detection - ready for new obstacle");
     }
-    return; // Вихід з функції, якщо перешкода вже оброблена і час скидання ще не минув
+    return;
   }
-
-  // Зчитуємо дані з лідара
   if (readLidarData()) {
-    float distanceM = distance / 100.0;
-    
+    float distanceM = distance / 100.0; // Переведення в метри
     Serial.print("Distance: ");
     Serial.print(distanceM);
     Serial.print(" m | Strength: ");
     Serial.println(strength);
-
-    // Перевірка на перешкоду
     if (distanceM <= OBSTACLE_DISTANCE) {
       if (obstacleDetectedTime == 0) {
         obstacleDetectedTime = millis();
-      }
-      else if (!isObstacleConfirmed && (millis() - obstacleDetectedTime >= OBSTACLE_CONFIRM_DELAY)) {
+      } else if (!isObstacleConfirmed && (millis() - obstacleDetectedTime >= OBSTACLE_CONFIRM_DELAY)) {
         isObstacleConfirmed = true;
-        obstacleHandled = true;  // Позначаємо що перешкода оброблена
+        obstacleHandled = true;
+        obstacleResetTime = millis();
         Serial.println("Obstacle detected! Activating next servo...");
         activateNextServo();
       }
-    } else {
-      // Перешкода зникла до підтвердження - скидаємо таймер
-      if (!isObstacleConfirmed) {
-        obstacleDetectedTime = 0;
-      }
+    } else if (!isObstacleConfirmed) {
+      obstacleDetectedTime = 0;
     }
   }
 }
@@ -367,13 +295,8 @@ void setup() {
   Serial.println("ESP32 Sequential One-Time Servo Control System");
   SerialPort.begin(SERIAL_BAUD, SERIAL_8N1, RX_PIN, TX_PIN);
   msp.begin(SerialPort);
-
-  // Ініціалізація сервоприводів
   initializeServos();
-
-  // Ініціалізація лідара
   lidarSerial.begin(LIDAR_BAUDRATE);
-
   delay(1000);
   Serial.println("System ready. Operating modes:");
   Serial.println("- OFF: All servos reset");
@@ -382,17 +305,12 @@ void setup() {
 }
 
 void loop() {
-  processMSP();  // Обробка режимів та додаткового перемикача
-  
-  // Обробка додаткового перемикача для серво в режимі MANUAL
+  processMSP();
   if (currentMode == MODE_MANUAL) {
     processAuxSwitch();
   }
-
-  // Якщо режим AUTO - обробка даних лідара
   if (currentMode == MODE_AUTO) {
     processLidarDataInAutoMode();
   }
-
-  delay(50);
+  // Затримка прибрана для підвищення швидкодії
 }
